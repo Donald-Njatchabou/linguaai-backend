@@ -57,7 +57,23 @@ const GREET = {
 
 const ACC="#10b981", DARK="#0f172a", CARD="#1e293b", CARD2="#263145", BORDER="#2d3f55", TXT="#e2e8f0", TXTS="#94a3b8", TXTT="#64748b";
 
-const API_URL = "http://localhost:8000/api/chat";
+const API_URL = "/api/chat";
+
+function sample(arr, n) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a.slice(0, n);
+}
+function seed() { return Math.random().toString(36).slice(2, 8); }
+function cleanText(t) { return t.replace(/^#+\s.*$/gm, "").replace(/[*_`]/g, "").trim(); }
+
+const LANG_BCP = {en:"en-US",fr:"fr-FR",es:"es-ES",de:"de-DE",it:"it-IT",ja:"ja-JP",pt:"pt-BR"};
+const QUIZ_THEMES = ["idioms and expressions","verbs","adjectives","conjunctions and connectors","professional vocabulary","everyday life","abstract nouns","adverbs","false friends","collocations","slang and informal speech","academic vocabulary"];
+const ORAL_THEMES = ["Ma journée de travail","Un voyage de rêve","La technologie et l'avenir","Mon film préféré","Les défis de la vie moderne","Une personne qui m'inspire","Mes ambitions professionnelles","La cuisine et les traditions","Le sport et la santé","L'énergie et l'environnement","Une rencontre inattendue","Les réseaux sociaux","Un souvenir d'enfance","L'argent et l'indépendance","La musique","Une panne et ses leçons","La ville contre la campagne","Apprendre une langue","Un projet entrepreneurial","Une décision difficile"];
+const ORAL_STYLES = ["a personal story","a short opinion piece","a vivid description","an anecdote with humor","a news-style paragraph","advice to a friend","a reflective monologue"];
 
 async function callAI(body) {
   const res = await fetch(API_URL, {
@@ -121,11 +137,15 @@ function App() {
 
   React.useEffect(() => { bottomRef.current?.scrollIntoView({behavior:"smooth"}); }, [messages, loading]);
 
-  const ORAL_TOPICS = ["Ma journée de travail","Un voyage de rêve","La technologie et l'avenir","Mon film préféré","Les défis de la vie moderne","Une personne qui m'inspire","Mes ambitions professionnelles"];
+  const seenQuiz = React.useRef([]);
+  const seenOral = React.useRef([]);
 
   function changeLang(code) {
     const l = LANGS.find(x=>x.code===code);
     setLang(l);
+    synthRef.current?.cancel(); setSpeaking(false);
+    setOralText(""); setOralFeedback(null); setTranscript("");
+    seenQuiz.current = []; seenOral.current = [];
     setMessages([{role:"assistant",text:GREET[code]||GREET.en,ts:now()}]);
     setFeedback([]);
     setCefr("A2");
@@ -163,11 +183,18 @@ function App() {
 
   async function genQuiz() {
     setMode("quiz"); setQuiz(null); setQuizLoading(true);
-    const hint = vocab.length>0 ? `Prioritize words from this list: ${vocab.slice(0,30).map(v=>v.word).join(", ")}.` : `Generate interesting ${lang.label} words: idioms, TOEFL verbs, adjectives, conjunctions.`;
+    const seen = seenQuiz.current;
+    const pool = vocab.filter(v=>!seen.includes(v.word));
+    const hint = pool.length>=6
+      ? `Choose exactly 4 words for the 4 questions, among these randomly picked candidates (skip any that are not real ${lang.label} words): ${sample(pool,8).map(v=>v.word).join(", ")}.`
+      : `Choose 4 varied ${lang.label} words or expressions of ${cefr} level or slightly above. Theme: ${sample(QUIZ_THEMES,1)[0]}. Be creative and avoid the most common textbook words. Random seed: ${seed()}.`;
+    const avoid = seen.length ? `\nNever use any of these already-seen words: ${seen.slice(-60).join(", ")}.` : "";
     try {
-      const data = await callAI({model:"claude-haiku-4-5-20251001",max_tokens:1200,messages:[{role:"user",content:`Generate 4 quiz questions for a ${lang.label} learner. ${hint}\nEach question: word, grammatical type, question in French, 4 choices (one correct), correct index (0-3), French explanation with example.\nRespond ONLY with a JSON array, no markdown:\n[{"word":"eager beaver","type":"Idiom","question":"Que signifie cette expression ?","choices":["Paresseux","Très zélé","Triste","Courageux"],"correct":1,"explanation":"Désigne quelqu'un de très enthousiaste. Ex: She's an eager beaver — always first to volunteer."}]`}]});
+      const data = await callAI({model:"claude-haiku-4-5-20251001",max_tokens:1200,messages:[{role:"user",content:`Generate 4 quiz questions for a ${lang.label} learner. ${hint}${avoid}\nEach question: word, grammatical type, question in French, 4 choices (one correct, shuffled so the correct index varies), correct index (0-3), French explanation with example.\nRespond ONLY with a JSON array, no markdown:\n[{"word":"eager beaver","type":"Idiom","question":"Que signifie cette expression ?","choices":["Paresseux","Très zélé","Triste","Courageux"],"correct":1,"explanation":"Désigne quelqu'un de très enthousiaste. Ex: She's an eager beaver — always first to volunteer."}]`}]});
       const raw = (data.content?.[0]?.text||"[]").replace(/```json|```/g,"").trim();
-      setQuiz(JSON.parse(raw).map(q=>({...q,selected:null,answered:false})));
+      const parsed = JSON.parse(raw);
+      seenQuiz.current = [...seen, ...parsed.map(q=>q.word)].slice(-300);
+      setQuiz(parsed.map(q=>({...q,selected:null,answered:false})));
     } catch { setQuiz([]); }
     setQuizLoading(false);
   }
@@ -213,11 +240,20 @@ function App() {
 
   async function genOralText(topic) {
     setOralLoading(true); setOralFeedback(null); setTranscript("");
-    const t = topic||ORAL_TOPICS[Math.floor(Math.random()*ORAL_TOPICS.length)];
-    setOralTopic(t);
+    synthRef.current?.cancel(); setSpeaking(false);
+    const t = topic||sample(ORAL_THEMES,1)[0];
+    setOralTopic(topic||"");
+    const style = sample(ORAL_STYLES,1)[0];
+    const avoid = seenOral.current.length ? ` Do not reuse any of these earlier openings: ${seenOral.current.slice(-8).join(" | ")}.` : "";
     try {
-      const data = await callAI({model:"claude-haiku-4-5-20251001",max_tokens:400,messages:[{role:"user",content:`Write a short, engaging passage in ${lang.label} (6-9 sentences) on the topic: "${t}". Use varied vocabulary, idioms, and natural expressions. Level: ${cefr}. Only output the passage, nothing else.`}]});
-      setOralText(data.content?.[0]?.text||"");
+      const data = await callAI({
+        model:"claude-haiku-4-5-20251001", max_tokens:500,
+        system:`You write original reading-aloud passages for language learners. You write ONLY in ${lang.label}, never in any other language, even if the theme is given in French.`,
+        messages:[{role:"user",content:`Write an original passage ENTIRELY in ${lang.label} (7-10 sentences) for a learner at ${cefr} level to read aloud. Inspiration theme (translate the idea, do not copy it as a title): "${t}". Style: ${style}. Choose a surprising, specific angle. Use varied vocabulary, idioms and natural expressions. No title, no heading, no markdown, no translation, no comment. Output only the passage.${avoid} Random seed: ${seed()}.`}]
+      });
+      const txt = cleanText(data.content?.[0]?.text||"");
+      seenOral.current = [...seenOral.current, txt.slice(0,60)].slice(-30);
+      setOralText(txt);
     } catch { setOralText("Erreur lors de la génération. Réessayez."); }
     setOralLoading(false);
   }
@@ -226,9 +262,11 @@ function App() {
     if (!synthRef.current) return;
     synthRef.current.cancel();
     const voices=synthRef.current.getVoices();
-    const langMap={en:"en",fr:"fr",es:"es",de:"de",it:"it",ja:"ja",pt:"pt"};
-    const voice=voices.find(v=>v.lang.startsWith(langMap[lang.code]||"en"))||voices[0];
+    const bcp=LANG_BCP[lang.code]||"en-US";
+    const norm=s=>s.toLowerCase().replace("_","-");
+    const voice=voices.find(v=>norm(v.lang)===norm(bcp))||voices.find(v=>norm(v.lang).startsWith(lang.code));
     const utt=new SpeechSynthesisUtterance(txt);
+    utt.lang=bcp;
     if (voice) utt.voice=voice;
     utt.rate=0.9; utt.pitch=1;
     utt.onstart=()=>setSpeaking(true);
@@ -333,7 +371,7 @@ function App() {
                 <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
                   <select onChange={e=>genOralText(e.target.value)} value={oralTopic} style={{fontSize:12,padding:"4px 8px",borderRadius:8,border:`1px solid ${BORDER}`,background:CARD2,color:TXT,cursor:"pointer"}}>
                     <option value="">Sujet aléatoire</option>
-                    {ORAL_TOPICS.map(t=><option key={t} value={t}>{t}</option>)}
+                    {ORAL_THEMES.map(t=><option key={t} value={t}>{t}</option>)}
                   </select>
                   <button onClick={()=>genOralText(oralTopic)} style={{fontSize:12,padding:"4px 12px",borderRadius:8,border:`1px solid ${BORDER}`,background:CARD2,color:TXT,cursor:"pointer"}}>🔄 Nouveau texte</button>
                 </div>
