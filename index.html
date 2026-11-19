@@ -83,7 +83,14 @@ async function callAI(body) {
   });
   if (!res.ok) {
     const err = await res.json().catch(()=>({}));
-    throw new Error(err.detail || `Erreur ${res.status}`);
+    const detail = typeof err.detail === "string" ? err.detail : "";
+    if (/credit balance|too low|billing/i.test(detail)) {
+      throw new Error("Crédit API épuisé. Recharge sur console.anthropic.com (Plans & Billing), puis réessaie.");
+    }
+    if (res.status === 401) throw new Error("Clé API invalide ou manquante. Vérifie la clé sur le serveur.");
+    if (res.status === 429) throw new Error("Trop de requêtes en peu de temps. Patiente quelques secondes et réessaie.");
+    if (res.status === 529 || res.status >= 500) throw new Error("Le service est momentanément indisponible. Réessaie dans un instant.");
+    throw new Error(detail || `Erreur ${res.status}`);
   }
   return res.json();
 }
@@ -117,6 +124,7 @@ function App() {
   const [addingObj, setAddingObj] = React.useState(false);
   const [quiz, setQuiz] = React.useState(null);
   const [quizLoading, setQuizLoading] = React.useState(false);
+  const [quizErr, setQuizErr] = React.useState("");
   const [panelOpen, setPanelOpen] = React.useState(true);
   const [importMsg, setImportMsg] = React.useState("");
   const [journalOpen, setJournalOpen] = React.useState(false);
@@ -176,7 +184,7 @@ function App() {
       } catch {}
       setMessages(p=>[...p,{role:"assistant",text:main.trim(),ts:now()}]);
     } catch(e) {
-      setMessages(p=>[...p,{role:"assistant",text:`Erreur : ${e.message}`,ts:now()}]);
+      setMessages(p=>[...p,{role:"assistant",text:`⚠️ ${e.message}`,ts:now()}]);
     }
     setLoading(false);
   }
@@ -195,7 +203,8 @@ function App() {
       const parsed = JSON.parse(raw);
       seenQuiz.current = [...seen, ...parsed.map(q=>q.word)].slice(-300);
       setQuiz(parsed.map(q=>({...q,selected:null,answered:false})));
-    } catch { setQuiz([]); }
+      setQuizErr("");
+    } catch(e) { setQuizErr(e.message || ""); setQuiz([]); }
     setQuizLoading(false);
   }
 
@@ -254,7 +263,7 @@ function App() {
       const txt = cleanText(data.content?.[0]?.text||"");
       seenOral.current = [...seenOral.current, txt.slice(0,60)].slice(-30);
       setOralText(txt);
-    } catch { setOralText("Erreur lors de la génération. Réessayez."); }
+    } catch(e) { setOralText(e.message || "Erreur lors de la génération. Réessayez."); }
     setOralLoading(false);
   }
 
@@ -301,7 +310,7 @@ function App() {
       let scores={};
       try{scores=JSON.parse((sc||"{}").replace(/```json|```/g,"").trim());}catch{}
       setOralFeedback({scores,lines:(fb||"").split("\n").filter(l=>l.trim()),tip});
-    } catch { setOralFeedback({scores:{},lines:["Erreur lors de l'évaluation."],tip:""}); }
+    } catch(e) { setOralFeedback({scores:{},lines:[e.message || "Erreur lors de l'évaluation."],tip:""}); }
     setOralEval(false);
   }
 
@@ -435,7 +444,7 @@ function App() {
                 <button onClick={genQuiz} style={{fontSize:12,padding:"5px 12px",borderRadius:8,border:`1px solid ${BORDER}`,background:CARD2,color:TXT,cursor:"pointer"}}>🔄 Nouveau</button>
               </div>
               {quizLoading && <div style={{textAlign:"center",color:TXTS,padding:40,fontSize:14}}>Génération du quiz…</div>}
-              {!quizLoading && quiz && quiz.length===0 && <div style={{textAlign:"center",color:TXTS,padding:40}}>Erreur. Réessayez.</div>}
+              {!quizLoading && quiz && quiz.length===0 && <div style={{textAlign:"center",color:TXTS,padding:40}}>{quizErr || "Erreur. Réessayez."}</div>}
               {!quizLoading && quiz && quiz.map((q,qi)=>(
                 <div key={qi} style={{marginBottom:18,padding:14,borderRadius:12,background:CARD2,border:`1px solid ${BORDER}`,animation:"pop 0.3s ease"}}>
                   <div style={{marginBottom:6,display:"flex",alignItems:"center",gap:8}}>
